@@ -292,11 +292,17 @@ let S;                 // the whole app state
 let storageOK = true;  // false if the browser blocks saving
 
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
+/* Entries from notes can carry local times ("2026-10-24T02:40"); they are converted on the phone, in its own time zone. */
+function localizeTimes(e) {
+  if (e && e.startLocal) { e.start = fromInput(e.startLocal); delete e.startLocal; }
+  if (e && e.endLocal) { e.end = fromInput(e.endLocal); delete e.endLocal; }
+  return e;
+}
 function migrate(d) {
   const base = clone(DEFAULTS);
   return {
     settings: { ...base.settings, ...(d.settings || {}) },
-    entries: Array.isArray(d.entries) ? d.entries.filter(e => e && e.id && e.type && isFinite(e.start)) : [],
+    entries: Array.isArray(d.entries) ? d.entries.map(localizeTimes).filter(e => e && e.id && e.type && isFinite(e.start)) : [],
     appts: Array.isArray(d.appts) ? d.appts.filter(a => a && a.id && isFinite(a.at)) : [],
     last: { ...base.last, ...(d.last || {}) },
     notified: d.notified || {}
@@ -536,25 +542,34 @@ function nurseSide(e, side) {   // ms nursed on one side, including the live tim
 function nurseTotal(e) { return nurseSide(e, 'L') + nurseSide(e, 'R'); }
 function lastSleepEnd() { let b = null; for (const e of S.entries) if (e.type === 'sleep' && e.end != null && (!b || e.end > b)) b = e.end; return b; }
 function lastSideUsed() {
-  const n = latest(e => e.type === 'nurse');
-  return n ? (n.end == null ? n.side : n.lastSide || (n.R > n.L ? 'R' : 'L')) : null;
+  const n = latest(e => e.type === 'nurse' && (e.end == null || e.lastSide === 'L' || e.lastSide === 'R'));
+  return n ? (n.end == null ? n.side : n.lastSide) : null;
 }
 function overlap(a1, a2, b1, b2) { return Math.max(0, Math.min(a2, b2) - Math.max(a1, b1)); }
 /* Totals between two moments (used for days, weeks and “last 24 hours”). */
 function stats(a, b) {
   const s = { sleep: 0, naps: 0, nights: 0, feeds: 0, nurse: 0, nurseCount: 0, bottles: 0, bottleMl: 0, wet: 0, dirty: 0, diapers: 0, pumpMl: 0, pumps: 0 };
+  const feedMinutes = new Set();   // breast + bottle logged at the same minute count as one feed
   for (const e of S.entries) {
     const inWin = e.start >= a && e.start < b;
     if (e.type === 'sleep') {
       s.sleep += overlap(e.start, e.end ?? now(), a, b);
       if (inWin) e.kind === 'night' ? s.nights++ : s.naps++;
     } else if (!inWin) continue;
-    else if (e.type === 'nurse') { s.feeds++; s.nurseCount++; s.nurse += nurseTotal(e); }
-    else if (e.type === 'bottle') { s.feeds++; s.bottles++; s.bottleMl += e.amountMl || 0; }
+    else if (e.type === 'nurse') { feedMinutes.add(Math.floor(e.start / MIN)); s.nurseCount++; s.nurse += nurseTotal(e); }
+    else if (e.type === 'bottle') { feedMinutes.add(Math.floor(e.start / MIN)); s.bottles++; s.bottleMl += e.amountMl || 0; }
     else if (e.type === 'diaper') { s.diapers++; if (e.kind !== 'dirty') s.wet++; if (e.kind !== 'wet') s.dirty++; }
     else if (e.type === 'pump' && e.amountMl) { s.pumps++; s.pumpMl += e.amountMl; }
   }
+  s.feeds = feedMinutes.size;
   return s;
+}
+/* How one feed reads in a sentence, e.g. "breastfed (right)" or "40 ml formula". */
+function feedPart(e) {
+  if (e.type === 'bottle') return `${fmtAmt(e.amountMl)} ${e.milk === 'breast' ? 'breast milk' : 'formula'}`;
+  const side = e.lastSide ? sideName(e.lastSide) : '';
+  if (e.noLength) return `breastfed${side ? ` (${side})` : ''}`;
+  return `breastfed ${fmtDur(nurseTotal(e))}${side ? `, ended on the ${side}` : ''}`;
 }
 function babyDays() {           // whole days since birth (0 on the birthday)
   if (!S.settings.birth) return null;
@@ -577,7 +592,10 @@ function describe(e) {
   const notes = e.notes ? ` ${e.notes}` : '';
   switch (e.type) {
     case 'sleep': return e.end == null ? ['Sleeping now', `since ${fmtClock(e.start)}`] : [`${e.kind === 'night' ? 'Night sleep' : 'Nap'}, ${fmtDur(e.end - e.start)}`, `until ${fmtClock(e.end)}.${notes}`];
-    case 'nurse': return e.end == null ? ['Nursing now', `on the ${sideName(e.side)}`] : [`Nursed ${fmtDur(nurseTotal(e))}`, `Left ${fmtDur(e.L || 0)}, right ${fmtDur(e.R || 0)}.${notes}`];
+    case 'nurse':
+      if (e.end == null) return ['Nursing now', `on the ${sideName(e.side)}`];
+      if (e.noLength) return [`Breastfed${e.lastSide ? `, ${sideName(e.lastSide)}` : ''}`, `Length not recorded.${notes}`];
+      return [`Nursed ${fmtDur(nurseTotal(e))}`, `Left ${fmtDur(e.L || 0)}, right ${fmtDur(e.R || 0)}.${notes}`];
     case 'bottle': return [`Bottle, ${fmtAmt(e.amountMl)}`, `${e.milk === 'breast' ? 'Breast milk' : 'Formula'}.${notes}`];
     case 'pump': return e.end == null ? ['Pumping now', sideName(e.side)] : [`Pumped ${e.amountMl ? fmtAmt(e.amountMl) : '(amount not added)'}`, `${cap(sideName(e.side) || 'both sides')}${e.end > e.start ? `, ${fmtDur(e.end - e.start)}` : ''}.${notes}`];
     case 'diaper': {
@@ -620,9 +638,10 @@ function viewHome() {
       <div class="row2"><button class="btn" data-act="welcomeSkip">Skip</button><button class="btn primary" data-act="welcomeSave">Save</button></div>
     </section>`;
 
-  const feedSub = !feed ? 'Tap Feed below to start' : feed.type === 'nurse'
-    ? (feed.end == null ? `Nursing now on the ${sideName(feed.side)}` : `At ${fmtClock(feed.start)}, ${fmtDur(nurseTotal(feed))}, ended on the ${sideName(feed.lastSide || 'L')}`)
-    : `At ${fmtClock(feed.start)}, ${fmtAmt(feed.amountMl)} ${feed.milk === 'breast' ? 'breast milk' : 'formula'}`;
+  const sameFeed = feed ? S.entries.filter(e => FEEDS.includes(e.type) && e.end != null && Math.floor(e.start / MIN) === Math.floor(feed.start / MIN)) : [];
+  const feedSub = !feed ? 'Tap Feed below to start' : feed.type === 'nurse' && feed.end == null
+    ? `Nursing now on the ${sideName(feed.side)}`
+    : `At ${fmtClock(feed.start)}, ${sameFeed.map(feedPart).join(' + ')}`;
   const dSub = diaper ? `${describe(diaper)[0]} at ${fmtClock(diaper.start)}` : 'Tap Diaper below to log one';
   h += `<section class="glance" aria-label="At a glance">
     <div class="g-row" style="--c:var(--feed)"><span class="g-label"><i class="dot"></i>Last fed</span>
@@ -725,7 +744,7 @@ function viewSummary() {
     const s = stats(t0, addDays(t0, 1));
     h += `<div class="stats">
       <div class="stat" style="--c:var(--sleep)"><b>${fmtDur(s.sleep)}</b><span>Sleep${s.naps ? `, ${s.naps} nap${s.naps > 1 ? 's' : ''}` : ''}</span></div>
-      <div class="stat" style="--c:var(--feed)"><b>${s.feeds} feed${s.feeds === 1 ? '' : 's'}</b><span>${[s.nurseCount && `${fmtDur(s.nurse)} nursing`, s.bottles && `${fmtAmt(s.bottleMl)} by bottle`].filter(Boolean).join(', ') || 'None yet'}</span></div>
+      <div class="stat" style="--c:var(--feed)"><b>${s.feeds} feed${s.feeds === 1 ? '' : 's'}</b><span>${[s.nurseCount && `${s.nurseCount} breastfeed${s.nurseCount > 1 ? 's' : ''}${s.nurse ? ` (${fmtDur(s.nurse)} timed)` : ''}`, s.bottles && `${fmtAmt(s.bottleMl)} by bottle`].filter(Boolean).join(', ') || 'None yet'}</span></div>
       <div class="stat" style="--c:var(--diaper)"><b>${s.diapers} diaper${s.diapers === 1 ? '' : 's'}</b><span>${s.wet} wet, ${s.dirty} dirty</span></div>
       <div class="stat" style="--c:var(--pump)"><b>${s.pumpMl ? fmtAmt(s.pumpMl) : '—'}</b><span>Pumped${s.pumps ? `, ${s.pumps} session${s.pumps > 1 ? 's' : ''}` : ''}</span></div></div>`;
   } else {
@@ -958,7 +977,9 @@ function sheetEdit(id, type) {
     if (live) f += `<label class="field"><span>Finished at</span><input type="datetime-local" name="end" value=""></label><p class="hint">Leave empty if still feeding. If set, the feed is saved with the time counted so far.</p>`;
     else f += `<div class="field-row"><label class="field"><span>Left (minutes)</span><input name="L" inputmode="numeric" type="number" min="0" value="${Math.round((base.L || 0) / MIN)}"></label>
       <label class="field"><span>Right (minutes)</span><input name="R" inputmode="numeric" type="number" min="0" value="${Math.round((base.R || 0) / MIN)}"></label></div>
-      <div class="seg" role="radiogroup" aria-label="Ended on">${['L', 'R'].map(v => `<label class="chip"><input type="radio" name="lastSide" value="${v}" ${(base.lastSide || 'L') === v ? 'checked' : ''}><span>Ended on ${sideName(v)}</span></label>`).join('')}</div>`;
+      <p class="hint">Didn’t time it? Leave both at 0.</p>
+      <h3>Side (or the side it ended on)</h3>
+      <div class="chips" role="radiogroup" aria-label="Side">${[['L', 'Left'], ['R', 'Right'], ['both', 'Both'], ['', 'Not noted']].map(([v, l]) => `<label class="chip"><input type="radio" name="lastSide" value="${v}" ${(base.lastSide || '') === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>`;
   }
   if (type === 'bottle') {
     f += `<label class="field"><span>Amount (${unit})</span><input name="amount" type="number" inputmode="decimal" step="any" min="0" value="${toUnit(base.amountMl ?? S.last.bottleMl)}"></label>
@@ -1033,8 +1054,8 @@ function saveEdit() {
       }
     } else {
       const L = num('L') || 0, R = num('R') || 0;
-      if (!L && !R) return fail('Add minutes for at least one side.');
-      e.L = L * MIN; e.R = R * MIN; e.end = start + e.L + e.R; e.lastSide = fd.get('lastSide') || (R > L ? 'R' : 'L');
+      e.L = L * MIN; e.R = R * MIN; e.end = start + e.L + e.R; e.lastSide = fd.get('lastSide') || undefined;
+      e.noLength = !L && !R ? true : undefined;
     }
   }
   if (type === 'bottle') {
@@ -1285,8 +1306,10 @@ $('#importFile').addEventListener('change', async e => {
     const d = migrate(JSON.parse(await file.text()));
     const have = new Set(S.entries.map(x => x.id)), haveA = new Set(S.appts.map(x => x.id));
     const add = d.entries.filter(x => !have.has(x.id)), addA = d.appts.filter(x => !haveA.has(x.id));
+    const freshPhone = !S.entries.length;
     change(`Restored ${add.length} entr${add.length === 1 ? 'y' : 'ies'}${addA.length ? ` and ${addA.length} appointment${addA.length > 1 ? 's' : ''}` : ''}`, () => {
       S.entries.push(...add); S.appts.push(...addA);
+      if (freshPhone && d.settings.units) S.settings.units = d.settings.units;   // first restore on a fresh phone adopts the units
       if (!S.settings.name && d.settings.name) S.settings.name = d.settings.name;
       if (!S.settings.birth && d.settings.birth) S.settings.birth = d.settings.birth;
     });
@@ -1360,7 +1383,7 @@ function reportData() {
 function reportText() {
   const r = reportData(), L = [];
   L.push(`${S.settings.name || 'Baby'}${ageText() ? `, ${ageText()}` : ''}`, `Summary of the last 7 days, made ${new Date().toLocaleString()}`, '');
-  r.days.forEach(({ d, s }) => L.push(`${new Date(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}: sleep ${fmtDur(s.sleep)}; ${s.feeds} feeds (${s.nurseCount} breast, ${fmtDur(s.nurse)}; ${s.bottles} bottles, ${fmtAmt(s.bottleMl) || '0'}); ${s.wet} wet, ${s.dirty} dirty${s.pumpMl ? `; pumped ${fmtAmt(s.pumpMl)}` : ''}`));
+  r.days.forEach(({ d, s }) => L.push(`${new Date(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}: sleep ${fmtDur(s.sleep)}; ${s.feeds} feeds (${s.nurseCount} breast${s.nurse ? `, ${fmtDur(s.nurse)} timed` : ''}; ${s.bottles} bottles, ${fmtAmt(s.bottleMl) || '0'}); ${s.wet} wet, ${s.dirty} dirty${s.pumpMl ? `; pumped ${fmtAmt(s.pumpMl)}` : ''}`));
   if (r.growth.length) { L.push('', 'Measurements:'); r.growth.forEach(e => L.push(`${new Date(e.start).toLocaleDateString()}: ${describe(e)[1]}`)); }
   if (r.meds.length) { L.push('', 'Medicines and vitamins:'); r.meds.forEach(e => L.push(`${fmtWhen(e.start)}: ${e.name}${e.amount ? `, ${e.amount}` : ''}`)); }
   if (r.notes.length) { L.push('', 'Notes:'); r.notes.forEach(e => L.push(`${fmtWhen(e.start)}: ${e.text || e.notes}`)); }
@@ -1370,7 +1393,7 @@ function reportText() {
 }
 function reportHtml() {
   const r = reportData(), name = esc(S.settings.name || 'Baby');
-  const rows = r.days.map(({ d, s }) => `<tr><td>${esc(new Date(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }))}</td><td>${fmtDur(s.sleep)}</td><td>${s.feeds}</td><td>${s.nurseCount} / ${fmtDur(s.nurse)}</td><td>${s.bottles} / ${fmtAmt(s.bottleMl) || '0'}</td><td>${s.wet}</td><td>${s.dirty}</td><td>${s.pumpMl ? fmtAmt(s.pumpMl) : '—'}</td></tr>`).join('');
+  const rows = r.days.map(({ d, s }) => `<tr><td>${esc(new Date(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }))}</td><td>${fmtDur(s.sleep)}</td><td>${s.feeds}</td><td>${s.nurseCount} / ${s.nurse ? fmtDur(s.nurse) : '—'}</td><td>${s.bottles} / ${fmtAmt(s.bottleMl) || '0'}</td><td>${s.wet}</td><td>${s.dirty}</td><td>${s.pumpMl ? fmtAmt(s.pumpMl) : '—'}</td></tr>`).join('');
   const list = (title, items) => items.length ? `<h2>${title}</h2><ul>${items.map(i => `<li>${i}</li>`).join('')}</ul>` : '';
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${name}: 7-day summary</title>
 <style>body{font-family:system-ui,sans-serif;max-width:800px;margin:24px auto;padding:0 16px;color:#1E2333;line-height:1.45}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{border-bottom:1px solid #CFD4E0;padding:6px 8px;text-align:left}h1{margin-bottom:0}.f{color:#545B70;font-size:.9rem}.w{overflow-x:auto}</style></head><body>

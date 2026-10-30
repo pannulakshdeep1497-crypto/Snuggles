@@ -1,7 +1,7 @@
 /* Snuggles service worker: makes the app open with no internet.
    Strategy: serve from cache first, refresh the cache in the background.
    Bump VERSION whenever index.html changes so phones pick up the update. */
-const VERSION = 'snuggles-v1';
+const VERSION = 'snuggles-v2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
