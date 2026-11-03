@@ -206,6 +206,10 @@ dialog.sheet::backdrop { background: rgba(10, 8, 6, .5); }
 
 /* ---------- Log ---------- */
 .day h3 { position: sticky; top: -6px; background: var(--bg); padding: 6px 0; margin: 0; z-index: 1; }
+/* Log filter chips: one scrollable row */
+.filter-row { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 6px; margin: 0 -2px; scrollbar-width: none; }
+.filter-row::-webkit-scrollbar { display: none; }
+.filter-row .chip { flex: none; }
 .entries { list-style: none; margin: 0; padding: 0; background: var(--surface); border-radius: 20px; box-shadow: var(--shadow); }
 .entries li + li { border-top: 1px solid var(--line); }
 .entry { width: 100%; background: none; border: 0; text-align: left; display: grid; grid-template-columns: 34px 1fr auto; gap: 10px; align-items: center; padding: 12px 14px; min-height: 60px; }
@@ -611,7 +615,11 @@ function describe(e) {
 }
 
 /* ---------- 5. SCREENS ---------- */
-let tab = 'home', sumRange = 'today', logDays = 7;
+let tab = 'home', sumRange = 'today', logDays = 7, logFilter = 'all';
+/* Log filters: [value, label, color]. "Feeds" covers breastfeeds and bottles. */
+const LOG_FILTERS = [['all', 'All', 'var(--ink)'], ['feed', 'Feeds', 'var(--feed)'], ['sleep', 'Sleep', 'var(--sleep)'], ['diaper', 'Diapers', 'var(--diaper)'],
+  ['pump', 'Pumping', 'var(--pump)'], ['med', 'Medicine', 'var(--more)'], ['growth', 'Growth', 'var(--visit)'], ['note', 'Notes', 'var(--more)']];
+const inFilter = (e, f = logFilter) => f === 'all' || (f === 'feed' ? FEEDS.includes(e.type) : e.type === f);
 
 function render() {
   $('#babyName').textContent = S.settings.name || 'Snuggles';
@@ -715,9 +723,15 @@ function banners() {
 /* Log: a simple timeline, newest first, grouped by day. Tap any row to fix it. */
 function viewLog() {
   const cutoff = addDays(startOfDay(now()), -(logDays - 1));
-  const list = S.entries.filter(e => e.start >= cutoff).sort((a, b) => b.start - a.start);
+  // Always newest first; entries at the same minute keep a stable order on both phones.
+  const list = S.entries.filter(e => e.start >= cutoff && inFilter(e)).sort((a, b) => b.start - a.start || (a.id < b.id ? -1 : 1));
   let h = `<div class="row2"><button class="btn" data-act="openPast">${icon('more')}Add a past entry</button><button class="btn" data-act="openVisit">${icon('visit')}Visits</button></div>`;
   if (!S.entries.length) return h + `<div class="empty">${icon('note')}<p>Nothing logged yet.<br>Entries you add on the Home screen show up here, and you can tap any of them to fix the time or details.</p></div>`;
+  // Only offer filters that have entries (plus All and whatever is selected).
+  const shown = LOG_FILTERS.filter(([v]) => v === 'all' || v === logFilter || S.entries.some(e => inFilter(e, v)));
+  h += `<div class="filter-row" role="radiogroup" aria-label="Show only">${shown.map(([v, l, c]) =>
+    `<label class="chip" style="--c:${c}"><input type="radio" name="logFilter" value="${v}" ${logFilter === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>`;
+  const label = (LOG_FILTERS.find(f => f[0] === logFilter) || LOG_FILTERS[0])[1].toLowerCase();
   let day = null;
   for (const e of list) {
     const d = startOfDay(e.start);
@@ -727,8 +741,8 @@ function viewLog() {
       ${icon(TYPE_ICON[e.type])}<span><b>${esc(title)}</b><span class="d">${esc(detail)}</span></span><span class="t">${fmtClock(e.start)}</span></button></li>`;
   }
   if (day !== null) h += '</ul></section>';
-  else h += `<div class="empty"><p>Nothing in the last ${logDays} days.</p></div>`;
-  if (S.entries.some(e => e.start < cutoff)) h += `<button class="btn wide" data-act="logMore">Show older entries</button>`;
+  else h += `<div class="empty"><p>${logFilter === 'all' ? 'Nothing' : `No ${label}`} in the last ${logDays} days.</p></div>`;
+  if (S.entries.some(e => e.start < cutoff && inFilter(e))) h += `<button class="btn wide" data-act="logMore">Show older ${logFilter === 'all' ? 'entries' : label}</button>`;
   return h;
 }
 
@@ -1285,6 +1299,7 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset.act === 'range') return ACTIONS.range(el);
+  if (el.name === 'logFilter') { logFilter = el.value; render(); $('#main').scrollTop = 0; const c = $(`input[name="logFilter"][value="${logFilter}"]`); if (c) { c.focus({ preventScroll: true }); c.closest('.chip').scrollIntoView({ inline: 'nearest', block: 'nearest' }); } return; }
   if (el.name === 'when') {
     const box = $('#whenCustomBox'); box.hidden = el.value !== 'custom';
     if (!box.hidden) { const i = $('#whenCustom'); i.value = hhmm(now()); i.focus(); try { i.showPicker(); } catch (_) { } }
